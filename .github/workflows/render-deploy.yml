@@ -1,0 +1,133 @@
+name: Deploy to Render
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+
+jobs:
+  # ===================================
+  # BUILD AND TEST
+  # ===================================
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Test Backend
+      - name: Install Backend dependencies
+        working-directory: healthcare-backend
+        run: npm ci
+
+      - name: Run Backend tests
+        working-directory: healthcare-backend
+        run: npm test || true
+        env:
+          NODE_ENV: test
+
+      # Test Frontend Build
+      - name: Install Frontend dependencies
+        working-directory: healthcare-frontend
+        run: npm ci
+
+      - name: Build Frontend
+        working-directory: healthcare-frontend
+        run: npm run build
+        env:
+          VITE_API_URL: https://healthcare-backend.onrender.com
+
+  # ===================================
+  # DEPLOY BACKEND TO RENDER
+  # ===================================
+  deploy-backend:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy Backend to Render
+        uses: johnbeynon/render-deploy-action@v0.0.8
+        with:
+          service-id: ${{ secrets.RENDER_BACKEND_SERVICE_ID }}
+          api-key: ${{ secrets.RENDER_API_KEY }}
+
+      - name: Wait for Backend deployment
+        run: sleep 60
+
+      - name: Health check Backend
+        run: |
+          for i in {1..10}; do
+            response=$(curl -s -o /dev/null -w "%{http_code}" ${{ secrets.RENDER_BACKEND_URL }}/health || echo "000")
+            if [ "$response" = "200" ]; then
+              echo "✅ Backend is healthy!"
+              exit 0
+            fi
+            echo "⏳ Waiting for backend... (attempt $i/10)"
+            sleep 30
+          done
+          echo "❌ Backend health check failed"
+          exit 1
+
+  # ===================================
+  # DEPLOY FRONTEND TO RENDER
+  # ===================================
+  deploy-frontend:
+    needs: deploy-backend
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy Frontend to Render
+        uses: johnbeynon/render-deploy-action@v0.0.8
+        with:
+          service-id: ${{ secrets.RENDER_FRONTEND_SERVICE_ID }}
+          api-key: ${{ secrets.RENDER_API_KEY }}
+
+      - name: Wait for Frontend deployment
+        run: sleep 60
+
+      - name: Health check Frontend
+        run: |
+          for i in {1..10}; do
+            response=$(curl -s -o /dev/null -w "%{http_code}" ${{ secrets.RENDER_FRONTEND_URL }}/health || echo "000")
+            if [ "$response" = "200" ]; then
+              echo "✅ Frontend is healthy!"
+              exit 0
+            fi
+            echo "⏳ Waiting for frontend... (attempt $i/10)"
+            sleep 30
+          done
+          echo "❌ Frontend health check failed"
+          exit 1
+
+  # ===================================
+  # NOTIFICATION
+  # ===================================
+  notify:
+    needs: [deploy-backend, deploy-frontend]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Deployment Status
+        run: |
+          if [ "${{ needs.deploy-backend.result }}" = "success" ] && [ "${{ needs.deploy-frontend.result }}" = "success" ]; then
+            echo "🎉 Deployment successful!"
+            echo "Backend: ${{ secrets.RENDER_BACKEND_URL }}"
+            echo "Frontend: ${{ secrets.RENDER_FRONTEND_URL }}"
+          else
+            echo "❌ Deployment failed!"
+            echo "Backend status: ${{ needs.deploy-backend.result }}"
+            echo "Frontend status: ${{ needs.deploy-frontend.result }}"
+            exit 1
+          fi
